@@ -43,10 +43,13 @@ def initialize_and_login(totp):
         logging.error(f"API लॉगिन में त्रुटि: {e}")
         return None
 
+# --->>> यहाँ बदलाव किया गया है <<<---
 def get_nifty_ltp(client):
+    """WebSocket का उपयोग करके निफ्टी 50 का लाइव प्राइस प्राप्त करता है।"""
     global nifty_ltp_value
     ltp_received_event.clear()
     nifty_ltp_value = None
+
     def on_message(message):
         global nifty_ltp_value
         if not ltp_received_event.is_set() and message and isinstance(message, list) and len(message) > 0:
@@ -54,16 +57,31 @@ def get_nifty_ltp(client):
                 nifty_ltp_value = float(message[0].get('iv'))
                 logging.info(f"Nifty LTP Received: {nifty_ltp_value}")
                 ltp_received_event.set()
+                # LTP मिलते ही कनेक्शन बंद कर दें
+                client.close_connection()
+
     def on_open(ws):
-        inst_tokens = [{"instrument_token": "Nifty 50", "exchange_segment": "nse_cm"}]
-        client.subscribe(instrument_tokens=inst_tokens, isIndex=True)
+        logging.info("WebSocket Connection Opened.")
+
     client.on_message = on_message
     client.on_open = on_open
-    ws_thread = threading.Thread(target=client.connect)
-    ws_thread.daemon = True
-    ws_thread.start()
+    
+    inst_tokens = [{"instrument_token": "Nifty 50", "exchange_segment": "nse_cm"}]
+    
+    # client.subscribe एक ब्लॉकिंग कॉल है, इसलिए इसे थ्रेड में चलाएं
+    subscribe_thread = threading.Thread(target=client.subscribe, kwargs={"instrument_tokens": inst_tokens, "isIndex": True})
+    subscribe_thread.daemon = True
+    subscribe_thread.start()
+
+    logging.info("Waiting for Nifty LTP...")
+    # 10 सेकंड तक LTP का इंतजार करें
     ltp_received_event.wait(timeout=10)
-    client.close_connection()
+    
+    # अगर टाइमआउट हो गया तो भी कनेक्शन बंद करें
+    if not ltp_received_event.is_set():
+        client.close_connection()
+        logging.warning("LTP request timed out.")
+
     return nifty_ltp_value
 
 def find_tuesday_expiry():
@@ -147,7 +165,6 @@ async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f'Symbols Found:\nCE: {call_symbol}\nPE: {put_symbol}')
     
     try:
-        # --->>> यहाँ बदलाव किया गया है <<<---
         quantity = "75" 
         await update.message.reply_text(f'ऑप्शन बेचने के ऑर्डर भेजे जा रहे हैं... (लॉट साइज: {quantity})')
         
@@ -177,9 +194,7 @@ async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"ट्रेडिंग के दौरान त्रुटि: {e}")
 
-# --->>> यहाँ नया फंक्शन जोड़ा गया है <<<---
 async def positions_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """आपकी खुली हुई F&O और इंट्राडे पोजीशन्स को दिखाता है।"""
     client = client_cache.get('api_client')
     if not client:
         await update.message.reply_text('आप लॉग इन नहीं हैं। कृपया पहले लॉगिन करें: /login <TOTP>')
@@ -187,28 +202,19 @@ async def positions_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     await update.message.reply_text('आपकी पोजीशन्स प्राप्त की जा रही हैं...')
     try:
-        # आपको positions API की डॉक्यूमेंटेशन देखनी होगी
         positions = client.positions() 
-        
         if not positions or not positions.get('data'):
             await update.message.reply_text('कोई खुली पोजीशन नहीं है।')
             return
 
         message = "📊 **आपकी खुली पोजीशन्स:**\n\n"
         for pos in positions['data']:
-            # यह एक अनुमानित फॉर्मेट है, आपको असली API रिस्पांस के अनुसार बदलना पड़ सकता है
             symbol = pos.get('trdSym', 'N/A')
             qty = pos.get('qty', '0')
             pnl = pos.get('pnl', '0.0')
             ltp = pos.get('ltp', '0.0')
-            
-            # अगर क्वांटिटी नेगेटिव है तो यह एक शॉर्ट पोजीशन है
             pos_type = "SELL" if int(qty) < 0 else "BUY"
-            
-            message += f"**{symbol}**\n"
-            message += f"   - मात्रा: {qty} ({pos_type})\n"
-            message += f"   - LTP: {ltp}\n"
-            message += f"   - P&L: **{pnl}**\n\n"
+            message += f"*{symbol}*\n- Qty: {qty} ({pos_type})\n- LTP: {ltp}\n- P&L: *{pnl}*\n\n"
             
         await update.message.reply_text(message, parse_mode='Markdown')
 
@@ -220,7 +226,6 @@ application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 application.add_handler(CommandHandler("start", start_command))
 application.add_handler(CommandHandler("login", login_command))
 application.add_handler(CommandHandler("trade", trade_command))
-# --->>> यहाँ नया कमांड हैंडलर जोड़ा गया है <<<---
 application.add_handler(CommandHandler("positions", positions_command))
 
 # --- वेबहूक के लिए Flask रूट्स ---
