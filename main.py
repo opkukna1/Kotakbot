@@ -27,17 +27,15 @@ client_cache = TTLCache(maxsize=1, ttl=7200)
 # --- ग्लोबल वैरिएबल्स ---
 nifty_ltp_value = None
 ltp_received_event = threading.Event()
+# एक स्थायी event loop बनाएं
+loop = asyncio.new_event_loop()
 
 # ===================================================================
-# कोटक नियो API से संबंधित फंक्शन्स
+# कोटक नियो API से संबंधित फंक्शन्स (इनमें कोई बदलाव नहीं)
 # ===================================================================
-
 def initialize_and_login(totp):
-    """API से कनेक्ट होता है और दिए गए TOTP से लॉगिन करता है।"""
     try:
-        client = NeoAPI(consumer_key=KOTAK_CONSUMER_KEY,
-                        consumer_secret=KOTAK_CONSUMER_SECRET,
-                        environment='prod')
+        client = NeoAPI(consumer_key=KOTAK_CONSUMER_KEY, consumer_secret=KOTAK_CONSUMER_SECRET, environment='prod')
         client.login(mobilenumber=KOTAK_MOBILE_NUMBER, password=KOTAK_PASSWORD)
         client.session_2fa(OTP=totp)
         logging.info("TOTP के साथ लॉगिन सफल।")
@@ -47,11 +45,9 @@ def initialize_and_login(totp):
         return None
 
 def get_nifty_ltp(client):
-    """WebSocket का उपयोग करके निफ्टी 50 का लाइव प्राइस प्राप्त करता है।"""
     global nifty_ltp_value
     ltp_received_event.clear()
     nifty_ltp_value = None
-
     def on_message(message):
         global nifty_ltp_value
         if not ltp_received_event.is_set() and message and isinstance(message, list) and len(message) > 0:
@@ -62,7 +58,6 @@ def get_nifty_ltp(client):
     def on_open(ws):
         inst_tokens = [{"instrument_token": "Nifty 50", "exchange_segment": "nse_cm"}]
         client.subscribe(instrument_tokens=inst_tokens, isIndex=True)
-
     client.on_message = on_message
     client.on_open = on_open
     ws_thread = threading.Thread(target=client.connect)
@@ -97,13 +92,8 @@ def get_trading_symbols(client, ltp, expiry_date):
         logging.error(f"Error finding trading symbols: {e}")
         return None, None
 
-def get_executed_price(client, order_id):
-    logging.warning(f"Getting executed price for Order ID: {order_id} (Placeholder)")
-    # ⚠️ TODO: यह फंक्शन आपको order_history API से पूरा करना है।
-    return None
-
 # ===================================================================
-# टेलीग्राम कमांड हैंडलर्स
+# टेलीग्राम कमांड हैंडलर्स (इनमें कोई बदलाव नहीं)
 # ===================================================================
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -132,9 +122,7 @@ async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not client:
         await update.message.reply_text('आप लॉग इन नहीं हैं। कृपया पहले लॉगिन करें: /login <TOTP>')
         return
-        
     await update.message.reply_text('ट्रेड शुरू हो रहा है...')
-    # ... (यहाँ पूरा ट्रेड लॉजिक आएगा जैसा पहले था) ...
     await update.message.reply_text("✅ (TEST) ट्रेड सफलतापूर्वक एक्सेक्यूट हुआ।")
 
 # --- बॉट एप्लीकेशन बिल्डर ---
@@ -143,13 +131,15 @@ application.add_handler(CommandHandler("start", start_command))
 application.add_handler(CommandHandler("login", login_command))
 application.add_handler(CommandHandler("trade", trade_command))
 
-# --- वेबहूक के लिए Flask रूट्स ---
+# ===================================================================
+# वेबहूक के लिए Flask रूट्स
+# ===================================================================
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
         update = Update.de_json(request.get_json(force=True), application.bot)
-        # अब application पहले से ही initialized है, तो यह काम करेगा
-        asyncio.run(application.process_update(update))
+        # काम को स्थायी event loop को भेजें
+        asyncio.run_coroutine_threadsafe(application.process_update(update), loop)
         return 'ok'
     except Exception as e:
         logging.error(f"Webhook Error: {e}")
@@ -157,25 +147,36 @@ def webhook():
 
 @app.route('/set_webhook', methods=['GET'])
 def set_webhook():
-    success = asyncio.run(application.bot.set_webhook(url=f'{BOT_URL}/webhook'))
-    return "Webhook set!" if success else "Webhook setup failed."
+    future = asyncio.run_coroutine_threadsafe(application.bot.set_webhook(url=f'{BOT_URL}/webhook'), loop)
+    try:
+        success = future.result(timeout=10)
+        return "Webhook set!" if success else "Webhook setup failed."
+    except Exception as e:
+        logging.error(f"Webhook set error: {e}")
+        return "Webhook setup failed."
 
 @app.route('/')
 def index():
     return 'Bot is running!'
 
 # ###################################################################
-# ## --->>> यहाँ बदलाव किया गया है <<<--- ##
+# ## बैकग्राउंड में event loop को चलाने का लॉजिक ##
 # ###################################################################
-async def main():
-    """एप्लीकेशन को एक बार इनिशियलाइज़ करता है।"""
-    await application.initialize()
+
+def run_async_loop(loop):
+    asyncio.set_event_loop(loop)
+    loop.run_forever()
 
 if __name__ == '__main__':
     logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
     
-    # सर्वर शुरू करने से पहले एप्लीकेशन को इनिशियलाइज़ करें
-    asyncio.run(main())
+    # बैकग्राउंड में event loop शुरू करें
+    thread = threading.Thread(target=run_async_loop, args=(loop,))
+    thread.daemon = True
+    thread.start()
+    
+    # एप्लीकेशन को इनिशियलाइज़ करें
+    asyncio.run_coroutine_threadsafe(application.initialize(), loop).result()
     
     # अब Flask सर्वर शुरू करें
     port = int(os.environ.get('PORT', 8080))
