@@ -27,11 +27,10 @@ client_cache = TTLCache(maxsize=1, ttl=7200)
 # --- ग्लोबल वैरिएबल्स ---
 nifty_ltp_value = None
 ltp_received_event = threading.Event()
-# एक स्थायी event loop बनाएं
 loop = asyncio.new_event_loop()
 
 # ===================================================================
-# कोटक नियो API से संबंधित फंक्शन्स (इनमें कोई बदलाव नहीं)
+# कोटक नियो API से संबंधित फंक्शन्स
 # ===================================================================
 def initialize_and_login(totp):
     try:
@@ -92,12 +91,21 @@ def get_trading_symbols(client, ltp, expiry_date):
         logging.error(f"Error finding trading symbols: {e}")
         return None, None
 
+def get_executed_price(client, order_id):
+    logging.warning(f"Getting executed price for Order ID: {order_id} (Placeholder)")
+    # ⚠️ TODO: यह फंक्शन आपको order_history API से पूरा करना है।
+    return None
+
 # ===================================================================
-# टेलीग्राम कमांड हैंडलर्स (इनमें कोई बदलाव नहीं)
+# टेलीग्राम कमांड हैंडलर्स
 # ===================================================================
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('नमस्ते! कृपया पहले लॉगिन करें: /login <6-अंकों-का-TOTP>')
+    await update.message.reply_text(
+        'नमस्ते! कृपया पहले लॉगिन करें: /login <6-अंकों-का-TOTP>\n'
+        'ट्रेड शुरू करने के लिए: /trade\n'
+        'खुली पोजीशन्स देखने के लिए: /positions'
+    )
 
 async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -111,7 +119,7 @@ async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if client:
             client_cache['api_client'] = client
-            await update.message.reply_text('✅ लॉगिन सफल! अब आप /trade कमांड का उपयोग कर सकते हैं।')
+            await update.message.reply_text('✅ लॉगिन सफल!')
         else:
             await update.message.reply_text('❌ लॉगिन विफल।')
     except (IndexError, ValueError):
@@ -122,23 +130,104 @@ async def trade_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not client:
         await update.message.reply_text('आप लॉग इन नहीं हैं। कृपया पहले लॉगिन करें: /login <TOTP>')
         return
+        
     await update.message.reply_text('ट्रेड शुरू हो रहा है...')
-    await update.message.reply_text("✅ (TEST) ट्रेड सफलतापूर्वक एक्सेक्यूट हुआ।")
+
+    ltp = get_nifty_ltp(client)
+    if not ltp:
+        await update.message.reply_text('निफ्टी LTP प्राप्त करने में विफल।')
+        return
+    await update.message.reply_text(f'वर्तमान निफ्टी स्पॉट: {ltp}')
+
+    expiry = find_tuesday_expiry()
+    call_symbol, put_symbol = get_trading_symbols(client, ltp, expiry)
+    if not call_symbol or not put_symbol:
+        await update.message.reply_text('ट्रेडिंग सिंबल नहीं मिल सके।')
+        return
+    await update.message.reply_text(f'Symbols Found:\nCE: {call_symbol}\nPE: {put_symbol}')
+    
+    try:
+        # --->>> यहाँ बदलाव किया गया है <<<---
+        quantity = "75" 
+        await update.message.reply_text(f'ऑप्शन बेचने के ऑर्डर भेजे जा रहे हैं... (लॉट साइज: {quantity})')
+        
+        call_order = client.place_order(exchange_segment="nse_fo", product="MIS", price="0", order_type="MKT", quantity=quantity, validity="DAY", trading_symbol=call_symbol, transaction_type="S")
+        put_order = client.place_order(exchange_segment="nse_fo", product="MIS", price="0", order_type="MKT", quantity=quantity, validity="DAY", trading_symbol=put_symbol, transaction_type="S")
+        
+        await update.message.reply_text(f'ऑर्डर भेजे गए। IDs: {call_order.get("nOrdNo")}, {put_order.get("nOrdNo")}')
+        
+        call_price = get_executed_price(client, call_order.get("nOrdNo")) or 100.0
+        put_price = get_executed_price(client, put_order.get("nOrdNo")) or 105.0
+        
+        if call_price == 100.0: 
+            await update.message.reply_text('⚠️ चेतावनी: असली सेलिंग प्राइस नहीं मिला। स्टॉप-लॉस एक डमी प्राइस पर आधारित है।')
+
+        await update.message.reply_text(f'प्राइस: CE @ ~{call_price}, PE @ ~{put_price}. अब स्टॉप-लॉस लगा रहा हूँ...')
+        
+        call_sl_trigger = round(call_price * 1.25, 1)
+        call_sl_limit = call_sl_trigger + 10
+        put_sl_trigger = round(put_price * 1.25, 1)
+        put_sl_limit = put_sl_trigger + 10
+        
+        client.place_order(exchange_segment="nse_fo", product="MIS", price=str(call_sl_limit), order_type="SL", quantity=quantity, validity="DAY", trading_symbol=call_symbol, transaction_type="B", trigger_price=str(call_sl_trigger))
+        client.place_order(exchange_segment="nse_fo", product="MIS", price=str(put_sl_limit), order_type="SL", quantity=quantity, validity="DAY", trading_symbol=put_symbol, transaction_type="B", trigger_price=str(put_sl_trigger))
+        
+        await update.message.reply_text(f"✅ ट्रेड सफलतापूर्वक शुरू हुआ!\nSL Triggers: CE={call_sl_trigger}, PE={put_sl_trigger}")
+
+    except Exception as e:
+        await update.message.reply_text(f"ट्रेडिंग के दौरान त्रुटि: {e}")
+
+# --->>> यहाँ नया फंक्शन जोड़ा गया है <<<---
+async def positions_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """आपकी खुली हुई F&O और इंट्राडे पोजीशन्स को दिखाता है।"""
+    client = client_cache.get('api_client')
+    if not client:
+        await update.message.reply_text('आप लॉग इन नहीं हैं। कृपया पहले लॉगिन करें: /login <TOTP>')
+        return
+        
+    await update.message.reply_text('आपकी पोजीशन्स प्राप्त की जा रही हैं...')
+    try:
+        # आपको positions API की डॉक्यूमेंटेशन देखनी होगी
+        positions = client.positions() 
+        
+        if not positions or not positions.get('data'):
+            await update.message.reply_text('कोई खुली पोजीशन नहीं है।')
+            return
+
+        message = "📊 **आपकी खुली पोजीशन्स:**\n\n"
+        for pos in positions['data']:
+            # यह एक अनुमानित फॉर्मेट है, आपको असली API रिस्पांस के अनुसार बदलना पड़ सकता है
+            symbol = pos.get('trdSym', 'N/A')
+            qty = pos.get('qty', '0')
+            pnl = pos.get('pnl', '0.0')
+            ltp = pos.get('ltp', '0.0')
+            
+            # अगर क्वांटिटी नेगेटिव है तो यह एक शॉर्ट पोजीशन है
+            pos_type = "SELL" if int(qty) < 0 else "BUY"
+            
+            message += f"**{symbol}**\n"
+            message += f"   - मात्रा: {qty} ({pos_type})\n"
+            message += f"   - LTP: {ltp}\n"
+            message += f"   - P&L: **{pnl}**\n\n"
+            
+        await update.message.reply_text(message, parse_mode='Markdown')
+
+    except Exception as e:
+        await update.message.reply_text(f"पोजीशन्स प्राप्त करने में त्रुटि हुई: {e}")
 
 # --- बॉट एप्लीकेशन बिल्डर ---
 application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 application.add_handler(CommandHandler("start", start_command))
 application.add_handler(CommandHandler("login", login_command))
 application.add_handler(CommandHandler("trade", trade_command))
+# --->>> यहाँ नया कमांड हैंडलर जोड़ा गया है <<<---
+application.add_handler(CommandHandler("positions", positions_command))
 
-# ===================================================================
-# वेबहूक के लिए Flask रूट्स
-# ===================================================================
+# --- वेबहूक के लिए Flask रूट्स ---
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
         update = Update.de_json(request.get_json(force=True), application.bot)
-        # काम को स्थायी event loop को भेजें
         asyncio.run_coroutine_threadsafe(application.process_update(update), loop)
         return 'ok'
     except Exception as e:
@@ -159,10 +248,7 @@ def set_webhook():
 def index():
     return 'Bot is running!'
 
-# ###################################################################
-# ## बैकग्राउंड में event loop को चलाने का लॉजिक ##
-# ###################################################################
-
+# --- बैकग्राउंड में event loop को चलाने का लॉजिक ---
 def run_async_loop(loop):
     asyncio.set_event_loop(loop)
     loop.run_forever()
@@ -170,14 +256,11 @@ def run_async_loop(loop):
 if __name__ == '__main__':
     logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
     
-    # बैकग्राउंड में event loop शुरू करें
     thread = threading.Thread(target=run_async_loop, args=(loop,))
     thread.daemon = True
     thread.start()
     
-    # एप्लीकेशन को इनिशियलाइज़ करें
     asyncio.run_coroutine_threadsafe(application.initialize(), loop).result()
     
-    # अब Flask सर्वर शुरू करें
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port)
