@@ -1,5 +1,6 @@
 import os
 import json
+import base64
 import firebase_admin
 from firebase_admin import credentials, firestore
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -9,13 +10,17 @@ from telegram.ext import (
 )
 
 # --- Telegram Bot Token ---
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # Render secrets me set karna
+BOT_TOKEN = os.getenv("BOT_TOKEN")  # Render secrets me set karo
 
-# --- Firebase Setup ---
-FIREBASE_KEY_JSON = os.getenv("FIREBASE_KEY_JSON")  # Render secrets me set karna
+# --- Firebase Setup (Base64 Safe) ---
+FIREBASE_KEY_JSON_B64 = os.getenv("FIREBASE_KEY_JSON_B64")
 
 if not firebase_admin._apps:
-    cred_dict = json.loads(FIREBASE_KEY_JSON)   # Safe parsing
+    if not FIREBASE_KEY_JSON_B64:
+        raise ValueError("⚠️ FIREBASE_KEY_JSON_B64 secret missing in Render!")
+
+    cred_json = base64.b64decode(FIREBASE_KEY_JSON_B64).decode("utf-8")
+    cred_dict = json.loads(cred_json)
     cred = credentials.Certificate(cred_dict)
     firebase_admin.initialize_app(cred)
 
@@ -51,7 +56,6 @@ async def subject_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Firebase subjects collection me store
     db.collection("subjects").document(subject).set({"name": subject}, merge=True)
 
-    # Example Topics (expand karna easy hai)
     topics = {
         "Rajasthan History": ["Mewar", "Marwar", "Civilisations"],
         "Rajasthan Polity": ["Constitution", "Governance", "Administration"],
@@ -76,10 +80,8 @@ async def topic_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     subject = context.user_data["subject"]
 
-    # Firebase topics collection me save
     db.collection("subjects").document(subject).collection("topics").document(topic).set({"name": topic}, merge=True)
 
-    # Example Subtopics
     subtopics = {
         "Mewar": ["Rana Sanga", "Rana Pratap", "Udai Singh"],
         "Marwar": ["Jaswant Singh", "Durgadas Rathore", "Ajit Singh"],
@@ -103,7 +105,6 @@ async def subtopic_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     subject = context.user_data["subject"]
     topic = context.user_data["topic"]
 
-    # Firebase me subtopic save
     db.collection("subjects").document(subject).collection("topics").document(topic).collection("subtopics").document(subtopic).set({"name": subtopic}, merge=True)
 
     await query.edit_message_text(f"✅ आपने चुना है: {subtopic}\nअब Poll forward करें।")
@@ -124,7 +125,6 @@ async def save_poll(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     correct_option = poll.correct_option_id if poll.correct_option_id is not None else -1
 
-    # Firebase me save
     db.collection("subjects").document(subject).collection("topics").document(topic).collection("subtopics").document(subtopic).collection("questions").add({
         "question": question,
         "options": options,
