@@ -8,12 +8,10 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     filters, ContextTypes, ConversationHandler
 )
-from flask import Flask, request
-import asyncio
+from flask import Flask
 
 # --- Firebase Setup ---
 FIREBASE_KEY_JSON_B64 = os.getenv("FIREBASE_KEY_JSON_B64")
-
 cred_json = base64.b64decode(FIREBASE_KEY_JSON_B64).decode("utf-8")
 cred_dict = json.loads(cred_json)
 
@@ -68,7 +66,7 @@ async def close(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Conversation बंद किया गया।")
     return ConversationHandler.END
 
-# --- Telegram Application ---
+# --- Application ---
 application = Application.builder().token(BOT_TOKEN).build()
 
 conv_handler = ConversationHandler(
@@ -85,26 +83,13 @@ conv_handler = ConversationHandler(
 )
 application.add_handler(conv_handler)
 
-# --- Flask App ---
-flask_app = Flask(__name__)
-
-@flask_app.route("/")
-def home():
-    return "Bot is alive!", 200
-
-@flask_app.route("/webhook", methods=["POST"])
-def webhook():
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    application.update_queue.put_nowait(update)
-    return "ok", 200
-
-# --- Main ---
+# --- Webhook run ---
 if __name__ == "__main__":
-    async def main():
-        # Set webhook
-        await application.bot.set_webhook(WEBHOOK_URL)
-        print("✅ Webhook set:", WEBHOOK_URL)
-    asyncio.get_event_loop().run_until_complete(main())
-
     port = int(os.environ.get("PORT", 8080))
-    flask_app.run(host="0.0.0.0", port=port)
+
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path=BOT_TOKEN,
+        webhook_url=f"{WEBHOOK_URL}/{BOT_TOKEN}",
+    )
