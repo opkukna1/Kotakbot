@@ -1,2 +1,2 @@
-python-telegram-bot==20.6
+python-telegram-bot[webhooks]==20.7
 firebase-admin==6.5.0
