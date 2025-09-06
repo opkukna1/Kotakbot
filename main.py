@@ -85,7 +85,7 @@ application.add_handler(conv_handler)
 
 # --- Webhook run ---
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
+    port = int(os.environ.get("PORT", 10000))
 
     application.run_webhook(
         listen="0.0.0.0",
