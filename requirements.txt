@@ -1,6 +1,2 @@
-git+https://github.com/Kotak-Neo/kotak-neo-api.git#egg=neo_api_client
-python-telegram-bot
-Flask
-gunicorn
-pandas
-cachetools
+python-telegram-bot==20.6
+firebase-admin==6.5.0
