@@ -58,7 +58,7 @@ async def subject_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Example Topics
     topics = {
-        "Rajasthan History": ["Mewar", "Marwar", "Civilisations"],
+        "Rajasthan History": ["पाषाणकाल और सिंधु घाटी सभ्यता", "वैदिक काल और महाजनपद", "मौर्य काल"],
         "Rajasthan Polity": ["Constitution", "Governance"],
         "Rajasthan Geography": ["Physical", "Rivers", "Climate"],
         "Rajasthan Art & Culture": ["Dance", "Music", "Architecture"],
