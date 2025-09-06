@@ -58,7 +58,7 @@ async def subject_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Example Topics
     topics = {
-        "Rajasthan History": ["प्राचीन राजस्थान", "marwar", "amer"],
+        "Rajasthan History": ["Ancient Rajasthan", "marwar", "amer"],
         "Rajasthan Polity": ["Constitution", "Governance"],
         "Rajasthan Geography": ["Physical", "Rivers", "Climate"],
         "Rajasthan Art & Culture": ["Dance", "Music", "Architecture"],
@@ -84,7 +84,7 @@ async def topic_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db.collection("subjects").document(subject).collection("topics").document(topic).set({"name": topic}, merge=True)
 
     subtopics = {
-        "प्राचीन राजस्थान": ["पाषाणकाल और सिंधु घाटी सभ्यता", "वैदिक काल और महाजनपद", "मौर्य काल", "गुप्त और गुप्तोत्तर काल"],
+        "Ancient Rajasthan": ["पाषाणकाल और सिंधु घाटी सभ्यता", "वैदिक काल और महाजनपद", "मौर्य काल"],
         "Marwar": ["Jaswant Singh", "Durgadas Rathore"],
         "Civilisations": ["Kalibangan", "Ahar"],
         "Constitution": ["Amendments", "Articles"],
