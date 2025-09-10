@@ -3,11 +3,14 @@ import json
 import base64
 import firebase_admin
 from firebase_admin import credentials, firestore
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import (
-    Application, CommandHandler, MessageHandler,
-    CallbackQueryHandler, filters, ContextTypes, ConversationHandler
+from telegram import (
+    Update, InlineKeyboardMarkup, InlineKeyboardButton
 )
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
+    filters, ContextTypes, ConversationHandler
+)
+from telegram.error import Forbidden
 
 # --- Firebase Setup ---
 FIREBASE_KEY_JSON_B64 = os.getenv("FIREBASE_KEY_JSON_B64")
@@ -21,13 +24,80 @@ if not firebase_admin._apps:
 db = firestore.client()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g. https://your-app.onrender.com/webhook
 
-# States
-ASK_SUBJECT, ASK_SUBSUBJECT, ASK_TOPIC, ASK_EXAM, ASK_YEAR, ASK_LEVEL, ASK_EXPLANATION, ASK_QUESTION = range(8)
+# --- States ---
+ASK_SUBJECT, ASK_SUBSUBJECT, ASK_TOPIC = range(3)
+ASK_Q_SUBJECT, ASK_Q_SUBSUBJECT, ASK_Q_TOPIC, ASK_EXAM, ASK_YEAR, ASK_LEVEL, ASK_EXPLANATION, ASK_QUESTION = range(8)
 
 
-# --- Start Question Add Flow ---
+# -------------------------------
+# SAFE SEND MESSAGE
+# -------------------------------
+async def safe_send_message(chat_id, text, context):
+    try:
+        await context.bot.send_message(chat_id=chat_id, text=text)
+    except Forbidden:
+        print(f"❌ User {chat_id} blocked the bot.")
+
+
+# -------------------------------
+# SUBJECT CREATION FLOW (/start)
+# -------------------------------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("📘 Subject नाम लिखें:")
+    return ASK_SUBJECT
+
+
+async def subject_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    subject = update.message.text.strip()
+    context.user_data["subject"] = subject
+    await update.message.reply_text(f"✅ Subject: {subject}\nअब Sub Subject लिखें:")
+    return ASK_SUBSUBJECT
+
+
+async def subsubject_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    subsubject = update.message.text.strip()
+    context.user_data["subsubject"] = subsubject
+    await update.message.reply_text(f"✅ Sub Subject: {subsubject}\nअब Topic लिखें:")
+    return ASK_TOPIC
+
+
+async def topic_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    topic = update.message.text.strip()
+    subject = context.user_data.get("subject")
+    subsubject = context.user_data.get("subsubject")
+
+    db.collection("subjects").document(subject).collection("subsubjects").document(subsubject).collection("topics").document(topic).set(
+        {"name": topic}, merge=True
+    )
+
+    await update.message.reply_text(
+        f"✅ Saved!\n\nSubject → {subject}\nSub Subject → {subsubject}\nTopic → {topic}\n\n"
+        "👉 /start (नया structure जोड़ें)\n👉 /add_question (Question जोड़ें)"
+    )
+    return ConversationHandler.END
+
+
+async def close(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ Conversation बंद किया गया।")
+    return ConversationHandler.END
+
+
+conv_handler_subject = ConversationHandler(
+    entry_points=[CommandHandler("start", start)],
+    states={
+        ASK_SUBJECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, subject_handler)],
+        ASK_SUBSUBJECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, subsubject_handler)],
+        ASK_TOPIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, topic_handler)],
+    },
+    fallbacks=[CommandHandler("close", close)],
+)
+
+
+# -------------------------------
+# QUESTION ADD FLOW (/add_question)
+# -------------------------------
 async def add_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     subjects = [doc.id for doc in db.collection("subjects").stream()]
     if not subjects:
@@ -36,10 +106,9 @@ async def add_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     keyboard = [[InlineKeyboardButton(s, callback_data=f"subject|{s}")] for s in subjects]
     await update.message.reply_text("📘 Subject चुनें:", reply_markup=InlineKeyboardMarkup(keyboard))
-    return ASK_SUBJECT
+    return ASK_Q_SUBJECT
 
 
-# --- Subject Handler ---
 async def subject_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -48,12 +117,15 @@ async def subject_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["subject"] = subject
 
     subsubjects = [doc.id for doc in db.collection("subjects").document(subject).collection("subsubjects").stream()]
+    if not subsubjects:
+        await query.edit_message_text("❌ इस subject में कोई subsubject नहीं है। पहले /start से जोड़ें।")
+        return ConversationHandler.END
+
     keyboard = [[InlineKeyboardButton(ss, callback_data=f"subsubject|{ss}")] for ss in subsubjects]
     await query.edit_message_text(f"✅ Subject: {subject}\n\nअब SubSubject चुनें:", reply_markup=InlineKeyboardMarkup(keyboard))
-    return ASK_SUBSUBJECT
+    return ASK_Q_SUBSUBJECT
 
 
-# --- SubSubject Handler ---
 async def subsubject_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -63,12 +135,15 @@ async def subsubject_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     subject = context.user_data["subject"]
     topics = [doc.id for doc in db.collection("subjects").document(subject).collection("subsubjects").document(subsubject).collection("topics").stream()]
+    if not topics:
+        await query.edit_message_text("❌ इस subsubject में कोई topic नहीं है। पहले /start से जोड़ें।")
+        return ConversationHandler.END
+
     keyboard = [[InlineKeyboardButton(t, callback_data=f"topic|{t}")] for t in topics]
     await query.edit_message_text(f"✅ SubSubject: {subsubject}\n\nअब Topic चुनें:", reply_markup=InlineKeyboardMarkup(keyboard))
-    return ASK_TOPIC
+    return ASK_Q_TOPIC
 
 
-# --- Topic Handler ---
 async def topic_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -80,14 +155,12 @@ async def topic_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ASK_EXAM
 
 
-# --- Exam ---
 async def exam_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["exam"] = update.message.text.strip()
     await update.message.reply_text("📅 Exam Year लिखें:")
     return ASK_YEAR
 
 
-# --- Year ---
 async def year_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["year"] = update.message.text.strip()
 
@@ -100,7 +173,6 @@ async def year_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ASK_LEVEL
 
 
-# --- Level ---
 async def level_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -112,14 +184,12 @@ async def level_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ASK_EXPLANATION
 
 
-# --- Explanation ---
 async def explanation_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["explanation"] = update.message.text.strip()
     await update.message.reply_text("📨 अब Question Poll forward करें:")
     return ASK_QUESTION
 
 
-# --- Save Question ---
 async def question_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.poll:
         await update.message.reply_text("❌ कृपया Poll Question forward करें।")
@@ -143,19 +213,16 @@ async def question_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     db.collection("subjects").document(subject).collection("subsubjects").document(subsubject).collection("topics").document(topic).collection("questions").add(question_data)
 
-    await update.message.reply_text("✅ Question सफलतापूर्वक Firebase में सेव हो गया।\n👉 /add_question नया question जोड़ने के लिए")
+    await update.message.reply_text("✅ Question Firebase में सेव हो गया।\n👉 /add_question नया question जोड़ने के लिए")
     return ConversationHandler.END
 
 
-# --- Application ---
-application = Application.builder().token(BOT_TOKEN).build()
-
-conv_handler = ConversationHandler(
+conv_handler_question = ConversationHandler(
     entry_points=[CommandHandler("add_question", add_question)],
     states={
-        ASK_SUBJECT: [CallbackQueryHandler(subject_chosen, pattern="^subject\\|")],
-        ASK_SUBSUBJECT: [CallbackQueryHandler(subsubject_chosen, pattern="^subsubject\\|")],
-        ASK_TOPIC: [CallbackQueryHandler(topic_chosen, pattern="^topic\\|")],
+        ASK_Q_SUBJECT: [CallbackQueryHandler(subject_chosen, pattern="^subject\\|")],
+        ASK_Q_SUBSUBJECT: [CallbackQueryHandler(subsubject_chosen, pattern="^subsubject\\|")],
+        ASK_Q_TOPIC: [CallbackQueryHandler(topic_chosen, pattern="^topic\\|")],
         ASK_EXAM: [MessageHandler(filters.TEXT & ~filters.COMMAND, exam_handler)],
         ASK_YEAR: [MessageHandler(filters.TEXT & ~filters.COMMAND, year_handler)],
         ASK_LEVEL: [CallbackQueryHandler(level_handler, pattern="^level\\|")],
@@ -164,7 +231,14 @@ conv_handler = ConversationHandler(
     },
     fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)],
 )
-application.add_handler(conv_handler)
+
+
+# -------------------------------
+# APPLICATION
+# -------------------------------
+application = Application.builder().token(BOT_TOKEN).build()
+application.add_handler(conv_handler_subject)   # /start flow
+application.add_handler(conv_handler_question)  # /add_question flow
 
 
 if __name__ == "__main__":
