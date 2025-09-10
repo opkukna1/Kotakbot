@@ -6,9 +6,8 @@ from firebase_admin import credentials, firestore
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
-    CallbackQueryHandler, ContextTypes, ConversationHandler, filters
+    CallbackQueryHandler, ConversationHandler, ContextTypes, filters
 )
-from flask import Flask, request
 
 # --- Firebase Setup ---
 FIREBASE_KEY_JSON_B64 = os.getenv("FIREBASE_KEY_JSON_B64")
@@ -24,17 +23,18 @@ db = firestore.client()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g. https://your-app.onrender.com
 
-# --- Flask App ---
-flask_app = Flask(__name__)
-
 # --- States ---
 ASK_Q_SUBJECT, ASK_Q_SUBSUBJECT, ASK_Q_TOPIC, ASK_Q_TEXT, ASK_Q_EXAM, ASK_Q_YEAR, ASK_Q_LEVEL, ASK_Q_EXPL = range(8)
 
-# --- Start Handler ---
+# --- Start ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("👋 Welcome! Use /add_question to save a new question.")
+
+# --- Add Question Flow ---
 async def add_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     subjects = [doc.id for doc in db.collection("subjects").stream()]
     if not subjects:
-        await update.message.reply_text("❌ अभी कोई subject नहीं है। पहले /start से जोड़ें।")
+        await update.message.reply_text("❌ अभी कोई subject नहीं है। पहले Firebase में subject जोड़ें।")
         return ConversationHandler.END
 
     keyboard = [[InlineKeyboardButton(s, callback_data=f"subject|{s}")] for s in subjects]
@@ -78,7 +78,7 @@ async def topic_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     topic = query.data.split("|")[1]
     context.user_data["topic"] = topic
 
-    await query.edit_message_text(f"✅ Topic: {topic}\n\nअब Question text भेजें (Poll forward कर सकते हैं):")
+    await query.edit_message_text(f"✅ Topic: {topic}\n\nअब Question text भेजें (Poll forward भी कर सकते हैं):")
     return ASK_Q_TEXT
 
 async def save_question_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -131,7 +131,7 @@ async def save_expl(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Question Firebase में Save हो गया!")
     return ConversationHandler.END
 
-# --- Telegram Application ---
+# --- Application ---
 application = Application.builder().token(BOT_TOKEN).build()
 
 conv_handler = ConversationHandler(
@@ -148,11 +148,15 @@ conv_handler = ConversationHandler(
     },
     fallbacks=[],
 )
+
+application.add_handler(CommandHandler("start", start))
 application.add_handler(conv_handler)
 
-# --- Flask Webhook Endpoint ---
-@flask_app.route(f"/{BOT_TOKEN}", methods=["POST"])
-def webhook():
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    application.update_queue.put_nowait(update)
-    return "ok"
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path=BOT_TOKEN,
+        webhook_url=f"{WEBHOOK_URL}/{BOT_TOKEN}",
+    )
