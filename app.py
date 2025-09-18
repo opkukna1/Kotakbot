@@ -8,18 +8,18 @@ from firebase_admin import credentials, firestore
 from flask import Flask, request
 import io
 
-# --- Step 1: Flask App ko Initialize Karna ---
+# --- Step 1: Flask App ko Initialize Karna (Koi Badlav Nahi) ---
 app = Flask(__name__)
 
-# --- Step 2: Render Environment Variables se Secrets Load Karna ---
+# --- Step 2: Environment Variables se Secrets Load Karna ---
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 
-# --- BADLAV 1: GitHub URL ab yahan seedhe code mein daala jayega ---
-# Environment variable se isko hata diya gaya hai.
-GITHUB_CSV_URL = "https://github.com/opkukna1/Kotakbot/blob/main/questions.csv"
+# --- BADLAV 1: GitHub URL ko hata diya gaya hai ---
+# Ab iski zaroorat nahi hai.
+# GITHUB_CSV_URL = "https://github.com/opkukna1/Kotakbot/blob/main/questions.csv"
 
-# --- Step 3: Firebase Initialization (Ismein koi badlav nahi) ---
+# --- Step 3: Firebase Initialization (Koi Badlav Nahi) ---
 try:
     firebase_key_b64 = os.getenv('FIREBASE_KEY_JSON_B64')
     if not firebase_key_b64:
@@ -36,7 +36,7 @@ try:
 except Exception as e:
     print(f"CRITICAL: Firebase initialization fail ho gaya: {e}")
 
-# --- Helper Functions (Inmein koi badlav nahi) ---
+# --- Helper Function (Koi Badlav Nahi) ---
 def send_telegram_message(chat_id, text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
@@ -45,17 +45,42 @@ def send_telegram_message(chat_id, text):
     except Exception as e:
         print(f"Telegram par message bhejne mein error: {e}")
 
-def upload_data_from_github():
+# --- BADLAV 2: Naya function jo Telegram se file download karega ---
+def get_csv_content_from_telegram(file_id):
+    """
+    Yeh function file_id ka istemal karke Telegram se file ka content download karta hai.
+    """
     try:
-        if GITHUB_CSV_URL == "YAHAN_APNI_CSV_FILE_KA_RAW_URL_PASTE_KAREIN":
-             return "*ERROR!* ❌\nCode mein GitHub CSV ka Raw URL nahi daala gaya hai."
-
-        response = requests.get(GITHUB_CSV_URL)
+        # Step 1: file_path haasil karna
+        get_file_path_url = f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
+        response = requests.get(get_file_path_url)
         response.raise_for_status()
+        file_path = response.json()['result']['file_path']
         
-        csv_data = io.StringIO(response.text)
-        df = pd.read_csv(csv_data).fillna('')
+        # Step 2: file_path se file download karna
+        download_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+        download_response = requests.get(download_url)
+        download_response.raise_for_status()
         
+        # File ka content text format mein return karna
+        return download_response.text
+    except Exception as e:
+        print(f"Telegram se file download karne mein error: {e}")
+        return None
+
+# --- BADLAV 3: Puraane function ko update karke naya function banaya gaya hai ---
+def process_and_upload_csv(csv_content_string):
+    """
+    Yeh function CSV data (string format mein) ko process karke Firebase par upload karta hai.
+    """
+    try:
+        csv_data = io.StringIO(csv_content_string)
+        # C parser error se bachne ke liye engine='python' ka istemal
+        df = pd.read_csv(csv_data, engine='python').fillna('')
+        
+        if df.empty:
+            return "*ERROR!* ❌\nCSV file khali hai ya format galat hai."
+
         collection_name = 'mcqs'
         for index, row in df.iterrows():
             question_data = {
@@ -73,35 +98,57 @@ def upload_data_from_github():
         
         return f"*SAFALTA!* ✅\nKul `{len(df)}` questions Firebase par upload ho gaye hain."
     except Exception as e:
+        # Line number wali error ko behtar tareeke se dikhana
+        if 'Error tokenizing data' in str(e):
+            return f"*ERROR!* ❌\nUpload fail ho gaya. Aapki CSV file mein formatting ki galti hai.\n\n*Technical Kaaran:* `{e}`"
         return f"*ERROR!* ❌\nUpload fail ho gaya. Kaaran: `{e}`"
 
-# --- Webhook Endpoint ---
+# --- BADLAV 4: Webhook ko poori tarah se update kiya gaya hai ---
 @app.route('/webhook', methods=['POST'])
 def webhook():
     if request.is_json:
         data = request.get_json()
         try:
-            chat_id = str(data['message']['chat']['id'])
-            message_text = data['message']['text'].strip()
+            message = data.get('message', {})
+            chat_id = str(message['chat']['id'])
 
-            # --- BADLAV 2: Chat ID ka security check yahan se hata diya gaya hai ---
-            # Ab yeh bot har us insaan ko reply karega jo ise message bhejega.
-            # if chat_id != YOUR_CHAT_ID:
-            #     return "Unauthorized", 403
-
-            if message_text == '/start':
-                send_telegram_message(chat_id, "Welcome! Main aapka Firebase Uploader Bot hoon.\n\nQuestions upload karne ke liye `/add_questions` command ka istemal karein.")
-            elif message_text == '/add_questions':
-                send_telegram_message(chat_id, "_Aapka command mil gaya hai... ⏳_\n_GitHub se CSV download karke Firebase par upload kiya jaa raha hai..._")
-                result = upload_data_from_github()
-                send_telegram_message(chat_id, result)
-            else:
-                send_telegram_message(chat_id, "Amanaya command. Kripya `/start` ya `/add_questions` ka istemal karein.")
+            # Case 1: Agar user ne koi text message bheja hai
+            if 'text' in message:
+                message_text = message['text'].strip()
+                if message_text == '/start':
+                    welcome_message = (
+                        "Welcome! Main aapka Firebase Uploader Bot hoon.\n\n"
+                        "Kripya mujhe `questions.csv` file seedhe yahan bhejein aur main use Firebase par upload kar doonga."
+                    )
+                    send_telegram_message(chat_id, welcome_message)
+                else:
+                    send_telegram_message(chat_id, "Amanaya command. Kripya `/start` command dein ya seedhe CSV file bhejein.")
+            
+            # Case 2: Agar user ne koi document (file) bheja hai
+            elif 'document' in message:
+                document = message['document']
+                # Check karein ki file CSV hai ya nahi
+                if document.get('mime_type') == 'text/csv' or document.get('file_name', '').endswith('.csv'):
+                    send_telegram_message(chat_id, "_Aapki file mil gayi hai... ⏳_\n_Data ko process karke Firebase par upload kiya jaa raha hai..._")
+                    
+                    file_id = document['file_id']
+                    csv_content = get_csv_content_from_telegram(file_id)
+                    
+                    if csv_content:
+                        result = process_and_upload_csv(csv_content)
+                        send_telegram_message(chat_id, result)
+                    else:
+                        send_telegram_message(chat_id, "*ERROR!* ❌\nTelegram se file download nahi ho payi.")
+                else:
+                    send_telegram_message(chat_id, "*ERROR!* ❌\nKripya sirf `.csv` format ki file hi bhejein.")
+        
         except KeyError:
+            # Agar message format alag ho to error na aaye
             pass
+            
     return "OK", 200
 
-# --- Webhook Setup (Ismein koi badlav nahi) ---
+# --- Webhook Setup (Koi Badlav Nahi) ---
 def set_webhook():
     if not all([BOT_TOKEN, WEBHOOK_URL]):
         print("ERROR: BOT_TOKEN ya WEBHOOK_URL environment variable nahi mila. Webhook set nahi kiya jaa sakta.")
@@ -117,10 +164,8 @@ def set_webhook():
     except Exception as e:
         print(f"Webhook set API call mein error: {e}")
 
-# --- App ko Chalana ---
+# --- App ko Chalana (Koi Badlav Nahi) ---
 if __name__ == '__main__':
     set_webhook()
-    # --- BADLAV 3 (Neeche samjhaya gaya hai) ---
-    # Render is 'PORT' variable ka istemal karta hai. Port 10000 set nahi karna hai.
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port)
