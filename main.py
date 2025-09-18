@@ -1,162 +1,126 @@
 import os
 import json
-import base64
+import base64  # Base64 encoding/decoding ke liye zaroori
+import requests
+import pandas as pd
 import firebase_admin
 from firebase_admin import credentials, firestore
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application, CommandHandler, MessageHandler,
-    CallbackQueryHandler, ConversationHandler, ContextTypes, filters
-)
+from flask import Flask, request
+import io
 
-# --- Firebase Setup ---
-FIREBASE_KEY_JSON_B64 = os.getenv("FIREBASE_KEY_JSON_B64")
-cred_json = base64.b64decode(FIREBASE_KEY_JSON_B64).decode("utf-8")
-cred_dict = json.loads(cred_json)
+# --- Step 1: Flask App ko Initialize Karna ---
+app = Flask(__name__)
 
-if not firebase_admin._apps:
-    cred = credentials.Certificate(cred_dict)
-    firebase_admin.initialize_app(cred)
+# --- Step 2: Render Environment Variables se Secrets Load Karna ---
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+YOUR_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID') 
+WEBHOOK_URL = os.getenv('WEBHOOK_URL') # Render se mila URL
+GITHUB_CSV_URL = os.getenv('GITHUB_RAW_URL')
 
-db = firestore.client()
+# --- Step 3: Base64 Encoded Firebase Key ko Decode aur Initialize Karna ---
+try:
+    # Base64 encoded string ko environment variable se padhein
+    firebase_key_b64 = os.getenv('FIREBASE_KEY_JSON_B64')
+    if not firebase_key_b64:
+        raise ValueError("FIREBASE_KEY_JSON_B64 environment variable nahi mila.")
+    
+    # Base64 string ko decode karke wapas normal JSON string banayein
+    firebase_key_json_str = base64.b64decode(firebase_key_b64).decode('utf-8')
+    
+    # JSON string ko Python dictionary mein badlein
+    service_account_info = json.loads(firebase_key_json_str)
+    
+    # Firebase ko initialize karein
+    cred = credentials.Certificate(service_account_info)
+    if not firebase_admin._apps:
+        firebase_admin.initialize_app(cred)
+    db = firestore.client()
+    print("Firebase initialization safal raha!")
+except Exception as e:
+    print(f"CRITICAL: Firebase initialization fail ho gaya: {e}")
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g. https://your-app.onrender.com
+# --- Helper Function: Telegram par message bhejne ke liye ---
+def send_telegram_message(chat_id, text):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
+    try:
+        requests.post(url, json=payload)
+    except Exception as e:
+        print(f"Telegram par message bhejne mein error: {e}")
 
-# --- States ---
-ASK_Q_SUBJECT, ASK_Q_SUBSUBJECT, ASK_Q_TOPIC, ASK_Q_TEXT, ASK_Q_EXAM, ASK_Q_YEAR, ASK_Q_LEVEL, ASK_Q_EXPL = range(8)
+# --- Asli Kaam: GitHub se data download karke Firebase par daalna ---
+def upload_data_from_github():
+    try:
+        response = requests.get(GITHUB_CSV_URL)
+        response.raise_for_status()
+        
+        csv_data = io.StringIO(response.text)
+        df = pd.read_csv(csv_data).fillna('')
+        
+        collection_name = 'mcqs'
+        for index, row in df.iterrows():
+            question_data = {
+                'question': str(row['Question']),
+                'options': [
+                    str(row['Option1']), str(row['Option2']),
+                    str(row['Option3']), str(row['Option4'])
+                ],
+                'correctOption': int(row['CorrectOption']),
+                'subject': str(row['Subject']),
+                'topic': str(row['Topic']),
+                'explanation': str(row['Explanation'])
+            }
+            db.collection(collection_name).add(question_data)
+        
+        return f"*SAFALTA!* ✅\nKul `{len(df)}` questions Firebase par upload ho gaye hain."
+    except Exception as e:
+        return f"*ERROR!* ❌\nUpload fail ho gaya. Kaaran: `{e}`"
 
-# --- Start ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Welcome! Use /add_question to save a new question.")
+# --- Webhook Endpoint - Jise Telegram call karega ---
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    if request.is_json:
+        data = request.get_json()
+        try:
+            chat_id = str(data['message']['chat']['id'])
+            message_text = data['message']['text'].strip()
 
-# --- Add Question Flow ---
-async def add_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    subjects = [doc.id for doc in db.collection("subjects").stream()]
-    if not subjects:
-        await update.message.reply_text("❌ अभी कोई subject नहीं है। पहले Firebase में subject जोड़ें।")
-        return ConversationHandler.END
+            if chat_id != YOUR_CHAT_ID:
+                return "Unauthorized", 403
 
-    keyboard = [[InlineKeyboardButton(s, callback_data=f"subject|{s}")] for s in subjects]
-    await update.message.reply_text("📘 Subject चुनें:", reply_markup=InlineKeyboardMarkup(keyboard))
-    return ASK_Q_SUBJECT
+            if message_text == '/start':
+                send_telegram_message(chat_id, "Welcome! Main aapka Firebase Uploader Bot hoon.\n\nQuestions upload karne ke liye `/add_questions` command ka istemal karein.")
+            elif message_text == '/add_questions':
+                send_telegram_message(chat_id, "_Aapka command mil gaya hai... ⏳_\n_GitHub se CSV download karke Firebase par upload kiya jaa raha hai..._")
+                result = upload_data_from_github()
+                send_telegram_message(chat_id, result)
+            else:
+                send_telegram_message(chat_id, "Amanaya command. Kripya `/start` ya `/add_questions` ka istemal karein.")
+        except KeyError:
+            pass
+    return "OK", 200
 
-async def subject_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    subject = query.data.split("|")[1]
-    context.user_data["subject"] = subject
+# --- Naya Function: App start hote hi Webhook set karne ke liye ---
+def set_webhook():
+    """Telegram ko batata hai ki hamara server kahan hai."""
+    if not all([BOT_TOKEN, WEBHOOK_URL]):
+        print("ERROR: BOT_TOKEN ya WEBHOOK_URL environment variable nahi mila. Webhook set nahi kiya jaa sakta.")
+        return
+    
+    webhook_api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={WEBHOOK_URL}/webhook"
+    try:
+        response = requests.get(webhook_api_url)
+        if response.json().get('ok'):
+            print("Webhook safaltapoorvak set ho gaya!")
+        else:
+            print(f"Webhook set karne mein error: {response.text}")
+    except Exception as e:
+        print(f"Webhook set API call mein error: {e}")
 
-    subsubjects = [doc.id for doc in db.collection("subjects").document(subject).collection("subsubjects").stream()]
-    if not subsubjects:
-        await query.edit_message_text("❌ इस subject में कोई subsubject नहीं है।")
-        return ConversationHandler.END
-
-    keyboard = [[InlineKeyboardButton(s, callback_data=f"subsubject|{s}")] for s in subsubjects]
-    await query.edit_message_text(f"✅ Subject: {subject}\n\nअब Subsubject चुनें:", reply_markup=InlineKeyboardMarkup(keyboard))
-    return ASK_Q_SUBSUBJECT
-
-async def subsubject_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    subsubject = query.data.split("|")[1]
-    context.user_data["subsubject"] = subsubject
-    subject = context.user_data["subject"]
-
-    topics = [doc.id for doc in db.collection("subjects").document(subject).collection("subsubjects").document(subsubject).collection("topics").stream()]
-    if not topics:
-        await query.edit_message_text("❌ इस subsubject में कोई topic नहीं है।")
-        return ConversationHandler.END
-
-    keyboard = [[InlineKeyboardButton(t, callback_data=f"topic|{t}")] for t in topics]
-    await query.edit_message_text(f"✅ Subsubject: {subsubject}\n\nअब Topic चुनें:", reply_markup=InlineKeyboardMarkup(keyboard))
-    return ASK_Q_TOPIC
-
-async def topic_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    topic = query.data.split("|")[1]
-    context.user_data["topic"] = topic
-
-    await query.edit_message_text(f"✅ Topic: {topic}\n\nअब Question text भेजें (Poll forward भी कर सकते हैं):")
-    return ASK_Q_TEXT
-
-async def save_question_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["question"] = update.message.text or update.message.poll.question
-    await update.message.reply_text("📚 यह Question किस Exam में आया था? (Exam का नाम लिखें)")
-    return ASK_Q_EXAM
-
-async def save_exam(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["exam"] = update.message.text.strip()
-    await update.message.reply_text("📅 Exam का Year लिखें:")
-    return ASK_Q_YEAR
-
-async def save_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["year"] = update.message.text.strip()
-    keyboard = [
-        [InlineKeyboardButton("Easy", callback_data="level|easy")],
-        [InlineKeyboardButton("Moderate", callback_data="level|moderate")],
-        [InlineKeyboardButton("Hard", callback_data="level|hard")],
-    ]
-    await update.message.reply_text("⚡ Difficulty Level चुनें:", reply_markup=InlineKeyboardMarkup(keyboard))
-    return ASK_Q_LEVEL
-
-async def save_level(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    level = query.data.split("|")[1]
-    context.user_data["level"] = level
-    await query.edit_message_text(f"✅ Level: {level}\n\nअब Explanation लिखें:")
-    return ASK_Q_EXPL
-
-async def save_expl(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["explanation"] = update.message.text.strip()
-    user_id = update.message.from_user.id
-
-    subject = context.user_data["subject"]
-    subsubject = context.user_data["subsubject"]
-    topic = context.user_data["topic"]
-
-    data = {
-        "question": context.user_data["question"],
-        "exam": context.user_data["exam"],
-        "year": context.user_data["year"],
-        "level": context.user_data["level"],
-        "explanation": context.user_data["explanation"],
-        "user_id": user_id,
-    }
-
-    db.collection("subjects").document(subject).collection("subsubjects").document(subsubject).collection("topics").document(topic).collection("questions").add(data)
-
-    await update.message.reply_text("✅ Question Firebase में Save हो गया!")
-    return ConversationHandler.END
-
-# --- Application ---
-application = Application.builder().token(BOT_TOKEN).build()
-
-conv_handler = ConversationHandler(
-    entry_points=[CommandHandler("add_question", add_question)],
-    states={
-        ASK_Q_SUBJECT: [CallbackQueryHandler(subject_chosen, pattern="^subject\\|")],
-        ASK_Q_SUBSUBJECT: [CallbackQueryHandler(subsubject_chosen, pattern="^subsubject\\|")],
-        ASK_Q_TOPIC: [CallbackQueryHandler(topic_chosen, pattern="^topic\\|")],
-        ASK_Q_TEXT: [MessageHandler(filters.TEXT | filters.POLL, save_question_text)],
-        ASK_Q_EXAM: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_exam)],
-        ASK_Q_YEAR: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_year)],
-        ASK_Q_LEVEL: [CallbackQueryHandler(save_level, pattern="^level\\|")],
-        ASK_Q_EXPL: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_expl)],
-    },
-    fallbacks=[],
-)
-
-application.add_handler(CommandHandler("start", start))
-application.add_handler(conv_handler)
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=port,
-        url_path=BOT_TOKEN,
-        webhook_url=f"{WEBHOOK_URL}/{BOT_TOKEN}",
-    )
+# --- App ko Chalana ---
+if __name__ == '__main__':
+    # App chalu hote hi webhook set karein
+    set_webhook()
+    # Render is 'PORT' variable ka istemal karta hai
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port)
