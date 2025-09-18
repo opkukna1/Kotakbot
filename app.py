@@ -17,7 +17,7 @@ WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 
 # --- BADLAV 1: GitHub URL ab yahan seedhe code mein daala jayega ---
 # Environment variable se isko hata diya gaya hai.
-GITHUB_CSV_URL = "YAHAN_APNI_CSV_FILE_KA_RAW_URL_PASTE_KAREIN"
+GITHUB_CSV_URL = "https://github.com/opkukna1/Kotakbot/blob/main/questions.csv"
 
 # --- Step 3: Firebase Initialization (Ismein koi badlav nahi) ---
 try:
