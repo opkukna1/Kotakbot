@@ -1,6 +1,6 @@
 import os
 import json
-import base64  # Base64 encoding/decoding ke liye zaroori
+import base64
 import requests
 import pandas as pd
 import firebase_admin
@@ -13,24 +13,21 @@ app = Flask(__name__)
 
 # --- Step 2: Render Environment Variables se Secrets Load Karna ---
 BOT_TOKEN = os.getenv('BOT_TOKEN')
-YOUR_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID') 
-WEBHOOK_URL = os.getenv('WEBHOOK_URL') # Render se mila URL
-GITHUB_CSV_URL = os.getenv('GITHUB_RAW_URL')
+WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 
-# --- Step 3: Base64 Encoded Firebase Key ko Decode aur Initialize Karna ---
+# --- BADLAV 1: GitHub URL ab yahan seedhe code mein daala jayega ---
+# Environment variable se isko hata diya gaya hai.
+GITHUB_CSV_URL = "YAHAN_APNI_CSV_FILE_KA_RAW_URL_PASTE_KAREIN"
+
+# --- Step 3: Firebase Initialization (Ismein koi badlav nahi) ---
 try:
-    # Base64 encoded string ko environment variable se padhein
     firebase_key_b64 = os.getenv('FIREBASE_KEY_JSON_B64')
     if not firebase_key_b64:
         raise ValueError("FIREBASE_KEY_JSON_B64 environment variable nahi mila.")
     
-    # Base64 string ko decode karke wapas normal JSON string banayein
     firebase_key_json_str = base64.b64decode(firebase_key_b64).decode('utf-8')
-    
-    # JSON string ko Python dictionary mein badlein
     service_account_info = json.loads(firebase_key_json_str)
     
-    # Firebase ko initialize karein
     cred = credentials.Certificate(service_account_info)
     if not firebase_admin._apps:
         firebase_admin.initialize_app(cred)
@@ -39,7 +36,7 @@ try:
 except Exception as e:
     print(f"CRITICAL: Firebase initialization fail ho gaya: {e}")
 
-# --- Helper Function: Telegram par message bhejne ke liye ---
+# --- Helper Functions (Inmein koi badlav nahi) ---
 def send_telegram_message(chat_id, text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
@@ -48,9 +45,11 @@ def send_telegram_message(chat_id, text):
     except Exception as e:
         print(f"Telegram par message bhejne mein error: {e}")
 
-# --- Asli Kaam: GitHub se data download karke Firebase par daalna ---
 def upload_data_from_github():
     try:
+        if GITHUB_CSV_URL == "YAHAN_APNI_CSV_FILE_KA_RAW_URL_PASTE_KAREIN":
+             return "*ERROR!* ❌\nCode mein GitHub CSV ka Raw URL nahi daala gaya hai."
+
         response = requests.get(GITHUB_CSV_URL)
         response.raise_for_status()
         
@@ -76,7 +75,7 @@ def upload_data_from_github():
     except Exception as e:
         return f"*ERROR!* ❌\nUpload fail ho gaya. Kaaran: `{e}`"
 
-# --- Webhook Endpoint - Jise Telegram call karega ---
+# --- Webhook Endpoint ---
 @app.route('/webhook', methods=['POST'])
 def webhook():
     if request.is_json:
@@ -85,8 +84,10 @@ def webhook():
             chat_id = str(data['message']['chat']['id'])
             message_text = data['message']['text'].strip()
 
-            if chat_id != YOUR_CHAT_ID:
-                return "Unauthorized", 403
+            # --- BADLAV 2: Chat ID ka security check yahan se hata diya gaya hai ---
+            # Ab yeh bot har us insaan ko reply karega jo ise message bhejega.
+            # if chat_id != YOUR_CHAT_ID:
+            #     return "Unauthorized", 403
 
             if message_text == '/start':
                 send_telegram_message(chat_id, "Welcome! Main aapka Firebase Uploader Bot hoon.\n\nQuestions upload karne ke liye `/add_questions` command ka istemal karein.")
@@ -100,9 +101,8 @@ def webhook():
             pass
     return "OK", 200
 
-# --- Naya Function: App start hote hi Webhook set karne ke liye ---
+# --- Webhook Setup (Ismein koi badlav nahi) ---
 def set_webhook():
-    """Telegram ko batata hai ki hamara server kahan hai."""
     if not all([BOT_TOKEN, WEBHOOK_URL]):
         print("ERROR: BOT_TOKEN ya WEBHOOK_URL environment variable nahi mila. Webhook set nahi kiya jaa sakta.")
         return
@@ -119,8 +119,8 @@ def set_webhook():
 
 # --- App ko Chalana ---
 if __name__ == '__main__':
-    # App chalu hote hi webhook set karein
     set_webhook()
-    # Render is 'PORT' variable ka istemal karta hai
+    # --- BADLAV 3 (Neeche samjhaya gaya hai) ---
+    # Render is 'PORT' variable ka istemal karta hai. Port 10000 set nahi karna hai.
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port)
