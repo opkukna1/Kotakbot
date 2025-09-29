@@ -19,7 +19,7 @@ WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 try:
     firebase_key_b64 = os.getenv('FIREBASE_KEY_JSON_B64')
     if not firebase_key_b64:
-        raise ValueError("FIREBASE_KEY_JSON_B64 environment variable nahi mila.")
+        raise ValueError("FIREBASE_KEY_JSON_B64 environment variable not found.")
     
     firebase_key_json_str = base64.b64decode(firebase_key_b64).decode('utf-8')
     service_account_info = json.loads(firebase_key_json_str)
@@ -28,9 +28,9 @@ try:
     if not firebase_admin._apps:
         firebase_admin.initialize_app(cred)
     db = firestore.client()
-    print("Firebase initialization safal raha!")
+    print("Firebase initialization successful!")
 except Exception as e:
-    print(f"CRITICAL: Firebase initialization fail ho gaya: {e}")
+    print(f"CRITICAL: Firebase initialization failed: {e}")
 
 # --- Helper Function (Koi Badlav Nahi) ---
 def send_telegram_message(chat_id, text):
@@ -39,13 +39,10 @@ def send_telegram_message(chat_id, text):
     try:
         requests.post(url, json=payload)
     except Exception as e:
-        print(f"Telegram par message bhejne mein error: {e}")
+        print(f"Error sending message to Telegram: {e}")
 
 # --- File Download Function (Koi Badlav Nahi) ---
 def get_csv_content_from_telegram(file_id):
-    """
-    Yeh function file_id ka istemal karke Telegram se file ka content download karta hai.
-    """
     try:
         get_file_path_url = f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
         response = requests.get(get_file_path_url)
@@ -58,69 +55,72 @@ def get_csv_content_from_telegram(file_id):
         
         return download_response.text
     except Exception as e:
-        print(f"Telegram se file download karne mein error: {e}")
+        print(f"Error downloading file from Telegram: {e}")
         return None
 
-# --- BADLAV: CSV Upload function ko naye structure aur dynamic options ke liye update kiya gaya hai ---
+# --- MUKHYA BADLAV: CSV Upload function ko naye 'correctAnswer' logic ke liye update kiya gaya hai ---
 def process_and_upload_csv(csv_content_string):
     """
-    Yeh function CSV data (string format mein) ko process karke Firebase par
-    Subject -> Topic -> questions ke structured format mein upload karta hai.
-    Yeh dynamic number of options ko bhi handle karta hai.
+    Yeh function CSV data ko process karke Firebase par upload karta hai.
+    Yeh 'CorrectIndex' column ki value ko seedhe 'correctAnswer' field mein save karta hai.
     """
     try:
         csv_data = io.StringIO(csv_content_string)
-        df = pd.read_csv(csv_data, engine='python').fillna('')
+        df = pd.read_csv(csv_data, engine='python', dtype=str).fillna('')
         
         if df.empty:
-            return "*ERROR!* ❌\nCSV file khali hai ya format galat hai."
+            return "*ERROR!* ❌\nCSV file is empty or has a wrong format."
 
         uploaded_count = 0
-        skipped_count = 0
-        
-        # Har row ko iterate karna
+        skipped_rows = []
+
         for index, row in df.iterrows():
             subject = str(row.get('Subject', '')).strip()
             topic = str(row.get('Topic', '')).strip()
+            # 'CorrectIndex' column se seedhe answer text le rahe hain
+            correct_answer_text = str(row.get('CorrectIndex', '')).strip()
 
-            # Agar Subject ya Topic khali hai, to is row ko skip kar dein
-            if not subject or not topic:
-                skipped_count += 1
+            # --- VALIDATION ---
+            # Agar Subject, Topic, ya answer text mein se kuchh bhi khali hai, to skip karein
+            if not subject or not topic or not correct_answer_text:
+                skipped_rows.append(index + 2)
                 continue
 
-            # --- Dynamic Options ko handle karna ---
+            # Dynamic Options ko handle karna
             options = []
-            # 'Option' se shuru hone wale sabhi columns ko dhundhna aur sort karna
             option_columns = sorted([col for col in df.columns if str(col).strip().startswith('Option')])
-            
             for col in option_columns:
-                # Agar us column mein value hai, to use options list mein add karein
-                if col in row and pd.notna(row[col]) and str(row[col]).strip() != '':
-                    options.append(str(row[col]))
+                option_text = str(row.get(col, '')).strip()
+                if option_text:
+                    options.append(option_text)
             
-            # Question data tayyar karna
+            # Question data tayyar karna naye format mein
             question_data = {
                 'question': str(row.get('Question', '')),
                 'options': options,
-                'correctIndex': int(row.get('CorrectIndex', 0)),
+                'correctAnswer': correct_answer_text, # <-- YEH MUKHYA BADLAV HAI
                 'explanation': str(row.get('Explanation', ''))
             }
 
-            # Firebase par naye structure mein data add karna: /{Subject}/{Topic}/questions/{auto-id}
             db.collection(subject).document(topic).collection('questions').add(question_data)
             uploaded_count += 1
         
         # Final result message banana
-        result_message = f"*SAFALTA!* ✅\nKul `{uploaded_count}` questions Firebase par upload ho gaye hain."
-        if skipped_count > 0:
-            result_message += f"\n\n*_Soochna:_* `{skipped_count}` questions ko skip kar diya gaya kyunki unmein 'Subject' ya 'Topic' nahi tha."
+        result_message = f"*SAFALTA!* ✅\nTotal `{uploaded_count}` questions have been uploaded to Firebase."
+        if skipped_rows:
+            unique_skipped_rows = sorted(list(set(skipped_rows)))
+            skipped_rows_str = ", ".join(map(str, unique_skipped_rows))
+            result_message += (f"\n\n*_Soochna:_* `{len(unique_skipped_rows)}` questions were skipped due to missing 'Subject', 'Topic', "
+                               f"or a blank correct answer.\n"
+                               f"*Please check row numbers:* `{skipped_rows_str}` in your CSV file.")
             
         return result_message
         
     except Exception as e:
         if 'Error tokenizing data' in str(e):
-            return f"*ERROR!* ❌\nUpload fail ho gaya. Aapki CSV file mein formatting ki galti hai.\n\n*Technical Kaaran:* `{e}`"
-        return f"*ERROR!* ❌\nUpload fail ho gaya. Kaaran: `{e}`"
+            return f"*ERROR!* ❌\nUpload failed. There is a formatting error in your CSV file.\n\n*Technical Reason:* `{e}`"
+        return f"*ERROR!* ❌\nUpload failed. Reason: `{e}`"
+
 
 # --- Webhook (Koi Badlav Nahi) ---
 @app.route('/webhook', methods=['POST'])
@@ -135,17 +135,17 @@ def webhook():
                 message_text = message['text'].strip()
                 if message_text == '/start':
                     welcome_message = (
-                        "Welcome! Main aapka Firebase Uploader Bot hoon.\n\n"
-                        "Kripya mujhe apni questions waali `.csv` file bhejein aur main use sahi format mein Firebase par upload kar doonga."
+                        "Welcome! I am your Firebase Uploader Bot.\n\n"
+                        "Please send me your `.csv` file with questions, and I will upload it to Firebase in the correct format."
                     )
                     send_telegram_message(chat_id, welcome_message)
                 else:
-                    send_telegram_message(chat_id, "Amanaya command. Kripya `/start` command dein ya seedhe CSV file bhejein.")
+                    send_telegram_message(chat_id, "Invalid command. Please use `/start` or send a CSV file directly.")
             
             elif 'document' in message:
                 document = message['document']
                 if document.get('mime_type') == 'text/csv' or document.get('file_name', '').endswith('.csv'):
-                    send_telegram_message(chat_id, "_Aapki file mil gayi hai... ⏳_\n_Data ko process karke Firebase par upload kiya jaa raha hai..._")
+                    send_telegram_message(chat_id, "_File received... ⏳_\n_Processing data and uploading to Firebase..._")
                     
                     file_id = document['file_id']
                     csv_content = get_csv_content_from_telegram(file_id)
@@ -154,9 +154,9 @@ def webhook():
                         result = process_and_upload_csv(csv_content)
                         send_telegram_message(chat_id, result)
                     else:
-                        send_telegram_message(chat_id, "*ERROR!* ❌\nTelegram se file download nahi ho payi.")
+                        send_telegram_message(chat_id, "*ERROR!* ❌\nCould not download the file from Telegram.")
                 else:
-                    send_telegram_message(chat_id, "*ERROR!* ❌\nKripya sirf `.csv` format ki file hi bhejein.")
+                    send_telegram_message(chat_id, "*ERROR!* ❌\nPlease send only files in `.csv` format.")
         
         except KeyError:
             pass
@@ -166,18 +166,18 @@ def webhook():
 # --- Webhook Setup (Koi Badlav Nahi) ---
 def set_webhook():
     if not all([BOT_TOKEN, WEBHOOK_URL]):
-        print("ERROR: BOT_TOKEN ya WEBHOOK_URL environment variable nahi mila. Webhook set nahi kiya jaa sakta.")
+        print("ERROR: BOT_TOKEN or WEBHOOK_URL environment variable not set. Cannot set webhook.")
         return
     
     webhook_api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={WEBHOOK_URL}/webhook"
     try:
         response = requests.get(webhook_api_url)
         if response.json().get('ok'):
-            print("Webhook safaltapoorvak set ho gaya!")
+            print("Webhook set successfully!")
         else:
-            print(f"Webhook set karne mein error: {response.text}")
+            print(f"Error setting webhook: {response.text}")
     except Exception as e:
-        print(f"Webhook set API call mein error: {e}")
+        print(f"Error in webhook API call: {e}")
 
 # --- App ko Chalana (Koi Badlav Nahi) ---
 if __name__ == '__main__':
