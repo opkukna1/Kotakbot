@@ -81,15 +81,15 @@ def process_and_upload_csv(csv_content_string):
         if df.empty:
             return "*ERROR!* ❌\nCSV file khali hai ya format galat hai."
 
-        collection_name = 'mcqs'
+        collection_name = 'Ancient India'
         for index, row in df.iterrows():
             question_data = {
                 'question': str(row['Question']),
                 'options': [
-                    str(row['Option1']), str(row['Option2']),
-                    str(row['Option3']), str(row['Option4'])
+                    str(row['Option0']), str(row['Option1']),
+                    str(row['Option2']), str(row['Option3'])
                 ],
-                'correctOption': int(row['CorrectOption']),
+                'correctIndex': int(row['CorrectIndex']),
                 'subject': str(row['Subject']),
                 'topic': str(row['Topic']),
                 'explanation': str(row['Explanation'])
