@@ -8,10 +8,8 @@ from firebase_admin import credentials, firestore
 from flask import Flask, request
 import io
 
-# --- Step 1: Flask App ko Initialize Karna (Koi Badlav Nahi) ---
+# --- Step 1 & 2: Flask App aur Environment Variables (Koi Badlav Nahi) ---
 app = Flask(__name__)
-
-# --- Step 2: Environment Variables se Secrets Load Karna (Koi Badlav Nahi) ---
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 
@@ -32,7 +30,7 @@ try:
 except Exception as e:
     print(f"CRITICAL: Firebase initialization failed: {e}")
 
-# --- Helper Function (Koi Badlav Nahi) ---
+# --- Helper & File Download Functions (Koi Badlav Nahi) ---
 def send_telegram_message(chat_id, text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
@@ -41,7 +39,6 @@ def send_telegram_message(chat_id, text):
     except Exception as e:
         print(f"Error sending message to Telegram: {e}")
 
-# --- File Download Function (Koi Badlav Nahi) ---
 def get_csv_content_from_telegram(file_id):
     try:
         get_file_path_url = f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
@@ -58,11 +55,11 @@ def get_csv_content_from_telegram(file_id):
         print(f"Error downloading file from Telegram: {e}")
         return None
 
-# --- MUKHYA BADLAV: CSV Upload function ko naye 'correctAnswer' logic ke liye update kiya gaya hai ---
+# --- MUKHYA BADLAV: CSV Upload Function ko Master CSV ke liye poori tarah se badal diya gaya hai ---
 def process_and_upload_csv(csv_content_string):
     """
-    Yeh function CSV data ko process karke Firebase par upload karta hai.
-    Yeh 'CorrectIndex' column ki value ko seedhe 'correctAnswer' field mein save karta hai.
+    Yeh function Master CSV ko process karke teen alag collections (subjects, topics, questions)
+    mein data upload karta hai. Yeh duplicates ko handle karta hai.
     """
     try:
         csv_data = io.StringIO(csv_content_string)
@@ -71,47 +68,87 @@ def process_and_upload_csv(csv_content_string):
         if df.empty:
             return "*ERROR!* ❌\nCSV file is empty or has a wrong format."
 
-        uploaded_count = 0
+        # Process kiye gaye documents ko track karne ke liye sets
+        processed_subjects = set()
+        processed_topics = set()
+        
+        # Counters
+        subjects_created = 0
+        topics_created = 0
+        questions_uploaded = 0
         skipped_rows = []
 
-        for index, row in df.iterrows():
-            subject = str(row.get('Subject', '')).strip()
-            topic = str(row.get('Topic', '')).strip()
-            # 'CorrectIndex' column se seedhe answer text le rahe hain
-            correct_answer_text = str(row.get('CorrectIndex', '')).strip()
+        # Zaroori columns ki list
+        required_columns = ['subjectId', 'subjectName', 'topicId', 'topicName', 'questionText', 'correctAnswerIndex']
+        if not all(col in df.columns for col in required_columns):
+            missing_cols = [col for col in required_columns if col not in df.columns]
+            return f"*ERROR!* ❌\nCSV file is missing required columns: `{', '.join(missing_cols)}`"
 
-            # --- VALIDATION ---
-            # Agar Subject, Topic, ya answer text mein se kuchh bhi khali hai, to skip karein
-            if not subject or not topic or not correct_answer_text:
+        for index, row in df.iterrows():
+            # --- Data Nikalna ---
+            subject_id = str(row.get('subjectId', '')).strip()
+            subject_name = str(row.get('subjectName', '')).strip()
+            topic_id = str(row.get('topicId', '')).strip()
+            topic_name = str(row.get('topicName', '')).strip()
+            question_text = str(row.get('questionText', '')).strip()
+            
+            # --- Validation ---
+            if not all([subject_id, subject_name, topic_id, topic_name, question_text]):
                 skipped_rows.append(index + 2)
                 continue
 
+            # --- Step 1: Subject ko Process Karna ---
+            if subject_id not in processed_subjects:
+                subject_data = {'name': subject_name}
+                db.collection('subjects').document(subject_id).set(subject_data, merge=True)
+                processed_subjects.add(subject_id)
+                subjects_created += 1
+
+            # --- Step 2: Topic ko Process Karna ---
+            if topic_id not in processed_topics:
+                topic_data = {'name': topic_name, 'subjectId': subject_id}
+                db.collection('topics').document(topic_id).set(topic_data, merge=True)
+                processed_topics.add(topic_id)
+                topics_created += 1
+
+            # --- Step 3: Question ko Process Karna ---
             # Dynamic Options ko handle karna
             options = []
-            option_columns = sorted([col for col in df.columns if str(col).strip().startswith('Option')])
+            option_columns = sorted([col for col in df.columns if str(col).strip().lower().startswith('option')])
             for col in option_columns:
                 option_text = str(row.get(col, '')).strip()
                 if option_text:
                     options.append(option_text)
             
-            # Question data tayyar karna naye format mein
+            # Correct Answer Index ko int mein convert karna
+            try:
+                correct_index = int(row.get('correctAnswerIndex'))
+            except (ValueError, TypeError):
+                skipped_rows.append(index + 2) # Agar index number nahi hai to skip karein
+                continue
+            
             question_data = {
-                'question': str(row.get('Question', '')),
+                'questionText': question_text,
                 'options': options,
-                'correctAnswer': correct_answer_text, # <-- YEH MUKHYA BADLAV HAI
-                'explanation': str(row.get('Explanation', ''))
+                'correctAnswerIndex': correct_index,
+                'explanation': str(row.get('explanation', '')).strip(),
+                'topicId': topic_id
             }
-
-            db.collection(subject).document(topic).collection('questions').add(question_data)
-            uploaded_count += 1
+            db.collection('questions').add(question_data)
+            questions_uploaded += 1
         
         # Final result message banana
-        result_message = f"*SAFALTA!* ✅\nTotal `{uploaded_count}` questions have been uploaded to Firebase."
+        result_message = (
+            f"*SAFALTA!* ✅\nUpload process complete.\n\n"
+            f"🔹 *New Subjects Created:* `{subjects_created}`\n"
+            f"🔹 *New Topics Created:* `{topics_created}`\n"
+            f"🔸 *Total Questions Uploaded:* `{questions_uploaded}`"
+        )
         if skipped_rows:
             unique_skipped_rows = sorted(list(set(skipped_rows)))
             skipped_rows_str = ", ".join(map(str, unique_skipped_rows))
-            result_message += (f"\n\n*_Soochna:_* `{len(unique_skipped_rows)}` questions were skipped due to missing 'Subject', 'Topic', "
-                               f"or a blank correct answer.\n"
+            result_message += (f"\n\n*_Soochna:_* `{len(unique_skipped_rows)}` questions were skipped due to missing data "
+                               f"or invalid 'correctAnswerIndex'.\n"
                                f"*Please check row numbers:* `{skipped_rows_str}` in your CSV file.")
             
         return result_message
@@ -122,7 +159,7 @@ def process_and_upload_csv(csv_content_string):
         return f"*ERROR!* ❌\nUpload failed. Reason: `{e}`"
 
 
-# --- Webhook (Koi Badlav Nahi) ---
+# --- Webhook and App Run (Koi Badlav Nahi) ---
 @app.route('/webhook', methods=['POST'])
 def webhook():
     if request.is_json:
@@ -136,16 +173,16 @@ def webhook():
                 if message_text == '/start':
                     welcome_message = (
                         "Welcome! I am your Firebase Uploader Bot.\n\n"
-                        "Please send me your `.csv` file with questions, and I will upload it to Firebase in the correct format."
+                        "Please send me your master `.csv` file, and I will create subjects, topics, and questions from it."
                     )
                     send_telegram_message(chat_id, welcome_message)
                 else:
-                    send_telegram_message(chat_id, "Invalid command. Please use `/start` or send a CSV file directly.")
+                    send_telegram_message(chat_id, "Invalid command. Please send a CSV file.")
             
             elif 'document' in message:
                 document = message['document']
                 if document.get('mime_type') == 'text/csv' or document.get('file_name', '').endswith('.csv'):
-                    send_telegram_message(chat_id, "_File received... ⏳_\n_Processing data and uploading to Firebase..._")
+                    send_telegram_message(chat_id, "_File received... ⏳_\n_Processing data and creating collections..._")
                     
                     file_id = document['file_id']
                     csv_content = get_csv_content_from_telegram(file_id)
@@ -163,7 +200,6 @@ def webhook():
             
     return "OK", 200
 
-# --- Webhook Setup (Koi Badlav Nahi) ---
 def set_webhook():
     if not all([BOT_TOKEN, WEBHOOK_URL]):
         print("ERROR: BOT_TOKEN or WEBHOOK_URL environment variable not set. Cannot set webhook.")
@@ -179,7 +215,6 @@ def set_webhook():
     except Exception as e:
         print(f"Error in webhook API call: {e}")
 
-# --- App ko Chalana (Koi Badlav Nahi) ---
 if __name__ == '__main__':
     set_webhook()
     port = int(os.environ.get('PORT', 8080))
