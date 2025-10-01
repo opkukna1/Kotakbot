@@ -9,12 +9,18 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 from flask import Flask, request
 import io
+import logging
 
-# --- Basic Setup (No Changes) ---
+# --- Basic Setup ---
 app = Flask(__name__)
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
 
+# --- Logging Setup ---
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# --- Firebase Initialization ---
 try:
     firebase_key_b64 = os.getenv('FIREBASE_KEY_JSON_B64')
     if not firebase_key_b64: raise ValueError("FIREBASE_KEY_JSON_B64 not found.")
@@ -27,9 +33,8 @@ try:
 except Exception as e:
     print(f"CRITICAL: Firebase initialization failed: {e}")
 
-# --- Helper & File Download Functions (FIXED) ---
+# --- Helper & File Download Functions ---
 def send_telegram_message(chat_id, text):
-    # FIX: Is function ka code missing tha
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
     try:
@@ -38,7 +43,6 @@ def send_telegram_message(chat_id, text):
         print(f"Error sending message to Telegram: {e}")
 
 def get_csv_content_from_telegram(file_id):
-    # FIX: Is function ka code missing tha
     try:
         get_file_path_url = f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
         response = requests.get(get_file_path_url)
@@ -54,7 +58,7 @@ def get_csv_content_from_telegram(file_id):
         print(f"Error downloading file from Telegram: {e}")
         return None
 
-# --- CSV Upload Function (No Changes) ---
+# --- CSV Upload Function ---
 def process_and_upload_csv(csv_content_string):
     try:
         csv_data = io.StringIO(csv_content_string)
@@ -143,7 +147,6 @@ def process_and_upload_csv(csv_content_string):
             result_message += (f"\n\n*_Soochna:_* `{len(unique_skipped_rows)}` questions were skipped due to missing data "
                                f"or invalid 'correctAnswerIndex'.\n"
                                f"*Please check row numbers:* `{skipped_rows_str}` in your CSV file.")
-            
         return result_message
         
     except Exception as e:
@@ -151,5 +154,47 @@ def process_and_upload_csv(csv_content_string):
             return f"*ERROR!* ❌\nUpload failed. There is a formatting error in your CSV file.\n\n*Technical Reason:* `{e}`"
         return f"*ERROR!* ❌\nUpload failed. Reason: `{e}`"
 
-# --- Webhook and App Run (No Changes) ---
-# ... (This part is unchanged)
+# --- Webhook and App Run ---
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    if request.is_json:
+        data = request.get_json()
+        try:
+            message = data.get('message', {})
+            chat_id = str(message['chat']['id'])
+
+            if 'document' in message:
+                document = message['document']
+                if document.get('mime_type') == 'text/csv' or document.get('file_name', '').endswith('.csv'):
+                    send_telegram_message(chat_id, "_File received... ⏳_\n_Processing data and creating collections..._")
+                    file_id = document['file_id']
+                    csv_content = get_csv_content_from_telegram(file_id)
+                    if csv_content:
+                        result = process_and_upload_csv(csv_content)
+                        send_telegram_message(chat_id, result)
+                    else:
+                        send_telegram_message(chat_id, "*ERROR!* ❌\nCould not download the file from Telegram.")
+                else:
+                    send_telegram_message(chat_id, "*ERROR!* ❌\nPlease send only files in `.csv` format.")
+        except KeyError:
+            pass
+    return "OK", 200
+
+def set_webhook():
+    if not all([BOT_TOKEN, WEBHOOK_URL]):
+        print("ERROR: BOT_TOKEN or WEBHOOK_URL environment variable not set. Cannot set webhook.")
+        return
+    webhook_api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={WEBHOOK_URL}/webhook"
+    try:
+        response = requests.get(webhook_api_url)
+        if response.json().get('ok'):
+            print("Webhook set successfully!")
+        else:
+            print(f"Error setting webhook: {response.text}")
+    except Exception as e:
+        print(f"Error in webhook API call: {e}")
+
+if __name__ == '__main__':
+    set_webhook()
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port)
