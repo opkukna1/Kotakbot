@@ -1,17 +1,14 @@
 # -*- coding: utf-8 -*-
 
-import re
-import json
-import csv
-import io
-import logging
 import os
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+import json
+import base64
+import requests
 import pandas as pd
 import firebase_admin
 from firebase_admin import credentials, firestore
-from flask import Flask
+from flask import Flask, request
+import io
 
 # --- Basic Setup (No Changes) ---
 app = Flask(__name__)
@@ -30,14 +27,34 @@ try:
 except Exception as e:
     print(f"CRITICAL: Firebase initialization failed: {e}")
 
-# --- Helper Functions (No Changes) ---
+# --- Helper & File Download Functions (FIXED) ---
 def send_telegram_message(chat_id, text):
-    # ... (function is unchanged)
+    # FIX: Is function ka code missing tha
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
+    try:
+        requests.post(url, json=payload)
+    except Exception as e:
+        print(f"Error sending message to Telegram: {e}")
 
 def get_csv_content_from_telegram(file_id):
-    # ... (function is unchanged)
+    # FIX: Is function ka code missing tha
+    try:
+        get_file_path_url = f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
+        response = requests.get(get_file_path_url)
+        response.raise_for_status()
+        file_path = response.json()['result']['file_path']
+        
+        download_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+        download_response = requests.get(download_url)
+        download_response.raise_for_status()
+        
+        return download_response.text
+    except Exception as e:
+        print(f"Error downloading file from Telegram: {e}")
+        return None
 
-# --- CSV Upload Function (Updated as Requested) ---
+# --- CSV Upload Function (No Changes) ---
 def process_and_upload_csv(csv_content_string):
     try:
         csv_data = io.StringIO(csv_content_string)
@@ -45,27 +62,22 @@ def process_and_upload_csv(csv_content_string):
         
         if df.empty: return "*ERROR!* ❌\nCSV file is empty or has a wrong format."
 
-        # FIX: testSeries ko track karne ke liye naya set
         processed_test_series = set()
         processed_subjects = set()
         processed_topics = set()
         
-        # FIX: testSeries ke liye naya counter
         test_series_created = 0
         subjects_created = 0
         topics_created = 0
         questions_uploaded = 0
         skipped_rows = []
 
-        # FIX: Zaroori columns ki list update ki gayi
         required_columns = ['testSeriesId', 'testSeriesName', 'subjectId', 'subjectName', 'topicId', 'topicName', 'questionText']
         if not all(col in df.columns for col in required_columns):
             missing_cols = [col for col in required_columns if col not in df.columns]
             return f"*ERROR!* ❌\nCSV file is missing required columns: `{', '.join(missing_cols)}`"
 
         for index, row in df.iterrows():
-            # --- Data Nikalna ---
-            # FIX: testSeriesId aur testSeriesName ko CSV se nikala ja raha hai
             test_series_id = str(row.get('testSeriesId', '')).strip()
             test_series_name = str(row.get('testSeriesName', '')).strip()
             subject_id = str(row.get('subjectId', '')).strip()
@@ -74,36 +86,28 @@ def process_and_upload_csv(csv_content_string):
             topic_name = str(row.get('topicName', '')).strip()
             question_text = str(row.get('questionText', '')).strip()
             
-            # --- Validation ---
-            # FIX: Validation mein testSeriesId aur testSeriesName ko joda gaya
             if not all([test_series_id, test_series_name, subject_id, subject_name, topic_id, topic_name, question_text]):
                 skipped_rows.append(index + 2)
                 continue
 
-            # --- Step 1: Test Series ko Process Karna ---
             if test_series_id not in processed_test_series:
-                # FIX: testSeries collection mein data daala ja raha hai
                 test_series_data = {'name': test_series_name}
                 db.collection('testSeries').document(test_series_id).set(test_series_data, merge=True)
                 processed_test_series.add(test_series_id)
                 test_series_created += 1
 
-            # --- Step 2: Subject ko Process Karna ---
             if subject_id not in processed_subjects:
-                # FIX: Subject ko uski testSeriesId ke saath link kiya ja raha hai
                 subject_data = {'name': subject_name, 'testSeriesId': test_series_id}
                 db.collection('subjects').document(subject_id).set(subject_data, merge=True)
                 processed_subjects.add(subject_id)
                 subjects_created += 1
 
-            # --- Step 3: Topic ko Process Karna (No Change) ---
             if topic_id not in processed_topics:
                 topic_data = {'name': topic_name, 'subjectId': subject_id}
                 db.collection('topics').document(topic_id).set(topic_data, merge=True)
                 processed_topics.add(topic_id)
                 topics_created += 1
 
-            # --- Step 4: Question ko Process Karna (No Change) ---
             options = []
             option_columns = sorted([col for col in df.columns if str(col).strip().lower().startswith('option')])
             for col in option_columns:
@@ -126,21 +130,26 @@ def process_and_upload_csv(csv_content_string):
             db.collection('questions').add(question_data)
             questions_uploaded += 1
         
-        # Final result message banana
         result_message = (
             f"*SAFALTA!* ✅\nUpload process complete.\n\n"
-            f"💠 *New Test Series Created:* `{test_series_created}`\n" # FIX
+            f"💠 *New Test Series Created:* `{test_series_created}`\n"
             f"🔹 *New Subjects Created:* `{subjects_created}`\n"
             f"🔸 *New Topics Created:* `{topics_created}`\n"
             f"▪️ *Total Questions Uploaded:* `{questions_uploaded}`"
         )
         if skipped_rows:
-            # ... (skipped rows message is unchanged)
+            unique_skipped_rows = sorted(list(set(skipped_rows)))
+            skipped_rows_str = ", ".join(map(str, unique_skipped_rows))
+            result_message += (f"\n\n*_Soochna:_* `{len(unique_skipped_rows)}` questions were skipped due to missing data "
+                               f"or invalid 'correctAnswerIndex'.\n"
+                               f"*Please check row numbers:* `{skipped_rows_str}` in your CSV file.")
             
         return result_message
         
     except Exception as e:
-        # ... (error handling is unchanged)
-        
+        if 'Error tokenizing data' in str(e):
+            return f"*ERROR!* ❌\nUpload failed. There is a formatting error in your CSV file.\n\n*Technical Reason:* `{e}`"
+        return f"*ERROR!* ❌\nUpload failed. Reason: `{e}`"
+
 # --- Webhook and App Run (No Changes) ---
-# ... (rest of the file is unchanged)
+# ... (This part is unchanged)
