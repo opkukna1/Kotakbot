@@ -35,6 +35,7 @@ except Exception as e:
 
 # --- Helper & File Download Functions ---
 def send_telegram_message(chat_id, text):
+    """Sends a text message to a specific Telegram chat."""
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
     try:
@@ -43,6 +44,7 @@ def send_telegram_message(chat_id, text):
         print(f"Error sending message to Telegram: {e}")
 
 def get_csv_content_from_telegram(file_id):
+    """Downloads a file from Telegram and returns its content as a string."""
     try:
         get_file_path_url = f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
         response = requests.get(get_file_path_url)
@@ -58,8 +60,48 @@ def get_csv_content_from_telegram(file_id):
         print(f"Error downloading file from Telegram: {e}")
         return None
 
+# --- NEW: Welcome Message Function ---
+def get_welcome_message():
+    """Returns the welcome message with command instructions."""
+    return (
+        "👋 *Welcome!* I am your Firestore Quiz Uploader Bot.\n\n"
+        "Here's what I can do:\n\n"
+        "1️⃣ *Upload Questions:*\n"
+        "   - Simply send me a `.csv` file with the correct format and I'll upload the questions to Firestore.\n\n"
+        "2️⃣ *Delete Questions by Topic:*\n"
+        "   - Use the command `/delete <topicId>`.\n"
+        "   - *Example:* `/delete history-101`\n\n"
+        "Send `/start` or `/help` anytime to see this message again."
+    )
+
+# --- NEW: Delete Function ---
+def delete_questions_by_topic(topic_id):
+    """Deletes all questions from Firestore that match a given topicId."""
+    if not topic_id:
+        return "*ERROR!* ❌\nPlease provide a Topic ID. Usage: `/delete <topicId>`"
+    
+    try:
+        questions_ref = db.collection('questions')
+        query = questions_ref.where('topicId', '==', topic_id)
+        docs = query.stream()
+        
+        deleted_count = 0
+        # Firestore requires iterating through documents to delete them
+        for doc in docs:
+            doc.reference.delete()
+            deleted_count += 1
+            
+        if deleted_count > 0:
+            return f"*SAFALTA!* ✅\nSuccessfully deleted `{deleted_count}` questions for Topic ID: `{topic_id}`."
+        else:
+            return f"*Soochna:* ℹ️\nNo questions found with Topic ID: `{topic_id}`."
+            
+    except Exception as e:
+        return f"*ERROR!* ❌\nFailed to delete questions. Reason: `{e}`"
+
 # --- CSV Upload Function ---
 def process_and_upload_csv(csv_content_string):
+    """Processes the CSV content and uploads data to Firestore."""
     try:
         csv_data = io.StringIO(csv_content_string)
         df = pd.read_csv(csv_data, engine='python', dtype=str).fillna('')
@@ -94,6 +136,7 @@ def process_and_upload_csv(csv_content_string):
                 skipped_rows.append(index + 2)
                 continue
 
+            # --- Firestore document creation logic (unchanged) ---
             if test_series_id not in processed_test_series:
                 test_series_data = {'name': test_series_name}
                 db.collection('testSeries').document(test_series_id).set(test_series_data, merge=True)
@@ -154,7 +197,7 @@ def process_and_upload_csv(csv_content_string):
             return f"*ERROR!* ❌\nUpload failed. There is a formatting error in your CSV file.\n\n*Technical Reason:* `{e}`"
         return f"*ERROR!* ❌\nUpload failed. Reason: `{e}`"
 
-# --- Webhook and App Run ---
+# --- MODIFIED: Webhook to handle commands and files ---
 @app.route('/webhook', methods=['POST'])
 def webhook():
     if request.is_json:
@@ -163,7 +206,25 @@ def webhook():
             message = data.get('message', {})
             chat_id = str(message['chat']['id'])
 
-            if 'document' in message:
+            # --- Handle Text Commands ---
+            if 'text' in message:
+                text = message['text'].strip()
+                
+                if text.startswith('/start') or text.startswith('/help'):
+                    send_telegram_message(chat_id, get_welcome_message())
+
+                elif text.startswith('/delete'):
+                    parts = text.split()
+                    if len(parts) > 1:
+                        topic_id_to_delete = parts[1]
+                        send_telegram_message(chat_id, f"_Deleting questions for Topic ID: `{topic_id_to_delete}`... ⏳_")
+                        result = delete_questions_by_topic(topic_id_to_delete)
+                        send_telegram_message(chat_id, result)
+                    else:
+                        send_telegram_message(chat_id, "*Invalid command.* ❌\nUsage: `/delete <topicId>`")
+            
+            # --- Handle File Uploads ---
+            elif 'document' in message:
                 document = message['document']
                 if document.get('mime_type') == 'text/csv' or document.get('file_name', '').endswith('.csv'):
                     send_telegram_message(chat_id, "_File received... ⏳_\n_Processing data and creating collections..._")
@@ -177,10 +238,12 @@ def webhook():
                 else:
                     send_telegram_message(chat_id, "*ERROR!* ❌\nPlease send only files in `.csv` format.")
         except KeyError:
+            # Ignore updates that are not messages (e.g., channel posts)
             pass
     return "OK", 200
 
 def set_webhook():
+    """Sets the Telegram webhook URL."""
     if not all([BOT_TOKEN, WEBHOOK_URL]):
         print("ERROR: BOT_TOKEN or WEBHOOK_URL environment variable not set. Cannot set webhook.")
         return
